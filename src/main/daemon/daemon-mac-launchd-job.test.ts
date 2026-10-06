@@ -8,9 +8,12 @@ import {
   bootstrapMacLaunchdJob,
   buildMacLaunchdPlist,
   classifyMacLaunchdJob,
-  pruneMacDaemonHosts,
-  terminateMacLaunchdJob
+  inspectMacLaunchdJob
 } from './daemon-mac-launchd-job'
+
+import { pruneMacDaemonHosts } from './daemon-mac-host-prune'
+import { bootoutMacLaunchdJob, terminateMacLaunchdJob } from './daemon-mac-job-retirement'
+import { lockMacDaemonHost } from './daemon-mac-host-lock'
 
 const { run } = vi.hoisted(() => ({ run: vi.fn() }))
 vi.mock('../../shared/child-process/run-process', () => ({ runProcess: run }))
@@ -148,5 +151,69 @@ describe('launchd lifetime reservation', () => {
         host
       ).status
     ).toBe('unverifiable')
+  })
+  it('accepts a realistic 20KB job print within a bounded larger capture', async () => {
+    const environment = Array.from(
+      { length: 80 },
+      (_, i) => `DEVELOPER_${i} => ${'x'.repeat(200)}`
+    ).join('\n')
+    const large = output(`environment = {\n${environment}\n}\nstate = running\npid = 42`)
+    expect(Buffer.byteLength(large)).toBeGreaterThan(16_384)
+    run.mockResolvedValue({ code: 0, stdout: large, timedOut: false })
+    expect(await inspectMacLaunchdJob(host)).toEqual({ status: 'live', pid: 42 })
+    expect(run.mock.calls[0][0].maxOutputBytes).toBe(256 * 1024)
+  })
+  it('never bootouts before positive process exit, and reclaims after the job record disappears', async () => {
+    vi.useFakeTimers()
+    let live = true
+    let removed = false
+    run.mockImplementation(async (spec) => {
+      if (spec.args[0] === 'bootout') {
+        expect(live).toBe(false)
+        removed = true
+        return { code: 0 }
+      }
+      return {
+        code: removed ? 3 : 0,
+        stdout: output(
+          live ? 'state = running\npid = 42' : 'state = not running\nlast exit code = 0'
+        )
+      }
+    })
+    try {
+      const pending = bootoutMacLaunchdJob(host)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(removed).toBe(false)
+      live = false
+      await vi.advanceTimersByTimeAsync(100)
+      expect(await pending).toBe(true)
+      await pruneMacDaemonHosts()
+      expect(existsSync(host.generationDir)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('retains a job that stays live and never bootouts it on a timeout', async () => {
+    vi.useFakeTimers()
+    run.mockResolvedValue({ code: 0, stdout: output('state = running\npid = 42') })
+    try {
+      const pending = bootoutMacLaunchdJob(host)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await pending).toBe(false)
+      expect(run.mock.calls.some(([spec]) => spec.args[0] === 'bootout')).toBe(false)
+      expect(existsSync(host.generationDir)).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('cannot prune between a probe job exit and its output read in another app process', async () => {
+    const unlock = lockMacDaemonHost(host)
+    expect(unlock).not.toBeNull()
+    await pruneMacDaemonHosts()
+    expect(run).not.toHaveBeenCalled()
+    expect(existsSync(host.generationDir)).toBe(true)
+    unlock?.()
+    await pruneMacDaemonHosts()
+    expect(existsSync(host.generationDir)).toBe(false)
   })
 })

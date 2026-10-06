@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync
@@ -180,4 +181,21 @@ describe('macOS immutable daemon host', () => {
     await expect(materializeMacDaemonHost(entry)).resolves.toBeNull()
     expect(run).not.toHaveBeenCalled()
   })
+  it.skipIf(!supportsSymlinks)(
+    'clones the real bundle when launched through a symlinked .app',
+    async () => {
+      const alias = join(root, 'Alias.app')
+      symlinkSync(bundle, alias)
+      prop('execPath', join(alias, 'Contents', 'MacOS', 'Orca'))
+      const helper = 'helperExecPath' in process ? process.helperExecPath : undefined
+      if (typeof helper !== 'string') {
+        throw new Error('Missing helper fixture')
+      }
+      prop('helperExecPath', helper.replace(bundle, alias))
+      const host = await materializeMacDaemonHost(entry.replace(bundle, alias))
+      expect(host).not.toBeNull()
+      expect(run.mock.calls[0][0].args.at(-2)).toBe(realpathSync(bundle))
+      expect(host && readFileSync(host.entryPath, 'utf8')).toBe(entry)
+    }
+  )
 })

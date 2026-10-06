@@ -6,7 +6,7 @@ import {
 import { isStartupDiagnosticsEnabled, logStartupDiagnostic } from '../startup/startup-diagnostics'
 import { checkDaemonHealth } from './daemon-health'
 import { collectPinnedDaemonVersions, pruneOldDaemonHosts } from './daemon-host-relocation'
-import { pruneMacDaemonHosts } from './daemon-mac-launchd-job'
+import { pruneMacDaemonHosts } from './daemon-mac-host-prune'
 import {
   cleanupFailedDaemonAdoption,
   releaseDaemonAdoptionLease,

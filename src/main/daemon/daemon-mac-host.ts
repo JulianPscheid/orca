@@ -57,7 +57,7 @@ export async function materializeMacDaemonHost(entryPath: string): Promise<MacDa
     const root = macDaemonHostRoot()
     staging = join(root, `${generation}.staging`)
     const generationDir = join(root, generation)
-    const bundle = dirname(dirname(dirname(process.execPath)))
+    const bundle = realpathSync(dirname(dirname(dirname(process.execPath))))
     if (!bundle.endsWith('.app')) {
       throw new Error('Missing packaged app bundle')
     }
@@ -65,8 +65,8 @@ export async function materializeMacDaemonHost(entryPath: string): Promise<MacDa
     if (typeof helperPath !== 'string' || !helperPath) {
       throw new Error('Missing Electron Helper executable')
     }
-    const execRel = inside(bundle, helperPath)
-    const entryRel = inside(bundle, entryPath)
+    const execRel = inside(bundle, realpathSync(helperPath))
+    const entryRel = inside(bundle, realpathSync(entryPath))
     ensurePrivateDir(root)
     mkdirSync(staging, { mode: 0o700 })
     // cp -c silently copies on non-APFS. Record a request, never promise block sharing.
@@ -167,9 +167,9 @@ export function readMacDaemonHost(generationDir: string): MacDaemonHost | null {
 }
 
 /** Shared with attribution classifiers: an intentional owned clone is a healthy location. */
-export function isOwnedMacDaemonExecutable(path: string): boolean {
+export function findOwnedMacDaemonHost(path: string): MacDaemonHost | null {
   if (process.platform !== 'darwin') {
-    return false
+    return null
   }
   try {
     const root = macDaemonHostRoot()
@@ -177,8 +177,12 @@ export function isOwnedMacDaemonExecutable(path: string): boolean {
     const rel = inside(root, resolvedPath)
     const generationDir = join(root, rel.split(sep)[0])
     const host = readMacDaemonHost(generationDir)
-    return host?.execPath === resolvedPath
+    return host?.execPath === resolvedPath ? host : null
   } catch {
-    return false
+    return null
   }
+}
+
+export function isOwnedMacDaemonExecutable(path: string): boolean {
+  return findOwnedMacDaemonHost(path) !== null
 }

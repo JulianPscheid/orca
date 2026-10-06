@@ -1,9 +1,5 @@
-// The remedy for the third of affected users whom a freshly forked daemon is still denied
-// (STA-7948) even though Orca itself is allowed: clear Orca's TCC row for that folder class so
-// macOS asks again, have the app touch the folder so the prompt names Orca, then re-probe.
-
 import { app } from 'electron'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import {
   isMacTccFolderClass,
   type DaemonPtyCwdClass,
@@ -12,6 +8,8 @@ import {
 import type { EventProps } from '../../shared/telemetry-events'
 import { readMacosBundleId, resetMacosTccPermission } from '../macos-tcc-reset'
 import { enumerateDirectoryOnce } from './directory-enumeration-probe'
+import { getMacDaemonFolderProbeHost } from './daemon-mac-folder-probe'
+import { probeFolderAccessForFreshDaemon } from './daemon-folder-access-probe'
 import { track } from '../telemetry/client'
 import {
   getDaemonFolderAccessMismatch,
@@ -38,7 +36,7 @@ const TCC_SERVICE_BY_CWD_CLASS: Record<MacTccFolderClass, string> = {
   downloads: 'SystemPolicyDownloadsFolder'
 }
 
-/** `Orca.app/Contents/MacOS/Orca` → `Orca.app`, the bundle whose id owns every TCC row. */
+/** TCC logs on packaged macOS identify the outer bundle as subject, even for its launchd Helper. */
 function runningAppBundlePath(): string {
   return resolve(dirname(app.getPath('exe')), '..', '..')
 }
@@ -46,16 +44,12 @@ function runningAppBundlePath(): string {
 /** An unanswered macOS sheet must not keep the fix dialog busy for the rest of the session. */
 const PROMPT_DEADLINE_MS = 60_000
 
-/**
- * Why the app reads the folder itself: TCC raises its prompt against the process that made the
- * syscall, so a daemon-side read would put the daemon on screen, or nothing at all. Async
- * throughout — the prompt blocks the calling syscall until the user answers it, and the sync
- * variant would take main's event loop down with it for the whole time the dialog is up.
- *
- * Returns false once the deadline passes with the read still blocked, which means the sheet is up
- * and unanswered. The read itself cannot be cancelled; it is simply no longer awaited.
- */
-async function promptByReadingFolder(path: string): Promise<boolean> {
+async function promptByReadingFolder(path: string, launchd: boolean): Promise<boolean> {
+  if (launchd) {
+    return (
+      (await probeFolderAccessForFreshDaemon(path, { timeoutMs: PROMPT_DEADLINE_MS })) !== 'unknown'
+    )
+  }
   let deadline: NodeJS.Timeout | undefined
   try {
     return await Promise.race([
@@ -101,14 +95,21 @@ export async function resetFolderAccessForDaemon(
   if (!target || !isMacTccFolderClass(target.cwdClass)) {
     return { outcome: 'unsupported' }
   }
-  const bundleId = await readMacosBundleId(runningAppBundlePath())
+  const host = getMacDaemonFolderProbeHost()
+  if (host === null) {
+    return { outcome: 'unsupported' }
+  }
+  const bundle = host
+    ? join(host.generationDir, relative(host.generationDir, host.execPath).split(sep)[0])
+    : runningAppBundlePath()
+  const bundleId = await readMacosBundleId(bundle)
   if (bundleId === null) {
     return { outcome: 'unsupported' }
   }
   if (!(await resetMacosTccPermission(TCC_SERVICE_BY_CWD_CLASS[target.cwdClass], bundleId)).ok) {
     return { outcome: 'reset_failed' }
   }
-  const prompted = await promptByReadingFolder(target.canonicalPath)
+  const prompted = await promptByReadingFolder(target.canonicalPath, host !== undefined)
   // Why no probe once the deadline passes: the sheet is still up, and a probe under it would read
   // as denied — a verdict about the unanswered prompt, not about the permission.
   if (prompted) {

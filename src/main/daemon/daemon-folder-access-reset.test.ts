@@ -9,8 +9,12 @@ const {
   resetMacosTccPermissionMock,
   getTargetMock,
   getMismatchMock,
-  refreshProbeMock
+  refreshProbeMock,
+  probeHostMock,
+  launchdProbeMock
 } = vi.hoisted(() => ({
+  probeHostMock: vi.fn(),
+  launchdProbeMock: vi.fn(),
   trackMock: vi.fn(),
   getPathMock: vi.fn(() => '/Applications/Orca.app/Contents/MacOS/Orca'),
   opendirMock: vi.fn(),
@@ -25,6 +29,10 @@ const {
   refreshProbeMock: vi.fn(async () => {})
 }))
 
+vi.mock('./daemon-mac-folder-probe', () => ({ getMacDaemonFolderProbeHost: probeHostMock }))
+vi.mock('./daemon-folder-access-probe', () => ({
+  probeFolderAccessForFreshDaemon: launchdProbeMock
+}))
 vi.mock('electron', () => ({ app: { getPath: getPathMock } }))
 vi.mock('node:fs/promises', () => ({ opendir: opendirMock }))
 vi.mock('../telemetry/client', () => ({ track: trackMock }))
@@ -55,6 +63,8 @@ function fakeDir(): { read: ReturnType<typeof vi.fn>; close: ReturnType<typeof v
 
 beforeEach(() => {
   setPlatform('darwin')
+  probeHostMock.mockReset().mockReturnValue(undefined)
+  launchdProbeMock.mockReset().mockResolvedValue('ok')
   trackMock.mockReset()
   getPathMock.mockReset().mockReturnValue('/Applications/Orca.app/Contents/MacOS/Orca')
   opendirMock.mockReset().mockResolvedValue(fakeDir())
@@ -227,6 +237,45 @@ describe('resetFolderAccessForDaemon runs the remedy', () => {
 
 // Nobody has verified this remedy on an affected machine, so the re-probe's verdict is the
 // feature's only evidence. It must leave main as a valid event every time.
+describe('launchd folder recovery', () => {
+  it('resets the measured outer subject of the daemon bundle, then prompts through launchd', async () => {
+    probeHostMock.mockReturnValue({
+      generationDir: '/owned/uuid',
+      execPath: '/owned/uuid/Orca.app/Contents/Frameworks/Orca Helper.app/Contents/MacOS/Helper'
+    })
+    await resetFolderAccessForDaemon(DAEMON)
+    expect(readMacosBundleIdMock).toHaveBeenCalledWith('/owned/uuid/Orca.app')
+    expect(resetMacosTccPermissionMock).toHaveBeenCalledWith(
+      'SystemPolicyDocumentsFolder',
+      'com.stablyai.orca'
+    )
+    expect(opendirMock).not.toHaveBeenCalled()
+    expect(launchdProbeMock).toHaveBeenCalledWith('/Users/alice/Documents/repo', {
+      timeoutMs: 60_000
+    })
+    expect(refreshProbeMock).toHaveBeenCalledWith(DAEMON, { force: true })
+  })
+  it('does not reset or read when the packaged subject is unverifiable', async () => {
+    probeHostMock.mockReturnValue(null)
+    expect(await resetFolderAccessForDaemon(DAEMON)).toEqual({ outcome: 'unsupported' })
+    expect(resetMacosTccPermissionMock).not.toHaveBeenCalled()
+    expect(opendirMock).not.toHaveBeenCalled()
+  })
+  it('does not re-probe an unanswered launchd prompt or report stored denial as its outcome', async () => {
+    probeHostMock.mockReturnValue({
+      generationDir: '/owned/uuid',
+      execPath: '/owned/uuid/Orca.app/Helper'
+    })
+    launchdProbeMock.mockResolvedValue('unknown')
+    await resetFolderAccessForDaemon(DAEMON)
+    expect(refreshProbeMock).not.toHaveBeenCalled()
+    expect(trackMock).toHaveBeenCalledWith('daemon_folder_access_notice', {
+      action: 'reset_outcome_unknown',
+      cwd_class: 'documents'
+    })
+  })
+})
+
 describe('resetFolderAccessForDaemon reports the outcome', () => {
   it.each([
     ['allowed', 'reset_outcome_allowed'],

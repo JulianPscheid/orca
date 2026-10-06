@@ -59,7 +59,8 @@ function parseProbeOutcome(stdout: string): FreshDaemonFolderAccess {
  * Bounded subprocess waits run off the spawn path; inconclusive access is `unknown`.
  */
 export async function probeFolderAccessForFreshDaemon(
-  path: string
+  path: string,
+  options: { timeoutMs?: number } = {}
 ): Promise<FreshDaemonFolderAccess> {
   // Why absolute-only: the path is the child's sole argv entry, and Node parses a leading-dash
   // argument as one of its own options.
@@ -67,7 +68,12 @@ export async function probeFolderAccessForFreshDaemon(
     return 'unknown'
   }
   try {
-    const macOutput = await probeMacDaemonFolder(PROBE_SCRIPT, path, probeEnvironment())
+    const macOutput = await probeMacDaemonFolder(
+      PROBE_SCRIPT,
+      path,
+      probeEnvironment(),
+      options.timeoutMs ?? PROBE_DEADLINE_MS
+    )
     if (macOutput !== undefined) {
       return macOutput === null ? 'unknown' : parseProbeOutcome(macOutput)
     }
@@ -75,7 +81,7 @@ export async function probeFolderAccessForFreshDaemon(
       program: process.execPath,
       args: ['-e', PROBE_SCRIPT, path],
       env: probeEnvironment(),
-      timeoutMs: PROBE_DEADLINE_MS,
+      timeoutMs: options.timeoutMs ?? PROBE_DEADLINE_MS,
       maxOutputBytes: PROBE_MAX_OUTPUT_BYTES
     })
     if (result.timedOut || result.code !== 0 || result.outputTruncated === true) {

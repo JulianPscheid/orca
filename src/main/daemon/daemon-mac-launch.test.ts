@@ -12,15 +12,26 @@ const m = vi.hoisted(() => ({
   connect: vi.fn(),
   identity: vi.fn(),
   disconnect: vi.fn(),
-  lease: vi.fn()
+  lease: vi.fn(),
+  unlock: vi.fn()
 }))
 vi.mock('./daemon-mac-host', () => ({ materializeMacDaemonHost: m.materialize }))
+vi.mock('./daemon-mac-host-lock', () => ({ lockMacDaemonHost: () => m.unlock }))
 vi.mock('./daemon-mac-launchd-job', () => ({
   bootstrapMacLaunchdJob: m.bootstrap,
   inspectMacLaunchdJob: m.inspect,
-  bootoutMacLaunchdJob: m.bootout,
-  terminateMacLaunchdJob: m.terminate,
   macLaunchdStartupError: () => 'startup diagnostic'
+}))
+vi.mock('./daemon-mac-job-retirement', () => ({
+  bootoutMacLaunchdJob: m.bootout,
+  terminateMacLaunchdJob: m.terminate
+}))
+vi.mock('./daemon-mac-launch-environment', () => ({
+  prepareMacDaemonEnvironment: () => ({
+    args: ['--require', '/owned/launch-environment.cjs'],
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+    dispose: () => {}
+  })
 }))
 vi.mock('./client', () => ({
   DaemonClient: class {
@@ -65,7 +76,7 @@ describe('authenticated launchd daemon readiness', () => {
   it('runs both paths from the clone, records stable responsibility, and transfers the connected lease', async () => {
     const handle = await launchMacDaemon(options)
     expect(handle).not.toBeNull()
-    expect(m.bootstrap.mock.calls[0][1][0]).toBe(host.entryPath)
+    expect(m.bootstrap.mock.calls[0][1][2]).toBe(host.entryPath)
     const args = m.bootstrap.mock.calls[0][1]
     expect(args[args.indexOf('--entry-path') + 1]).toBe(options.entryPath)
     expect(args[args.indexOf('--spawner-exec-path') + 1]).toBe(host.execPath)
@@ -75,6 +86,7 @@ describe('authenticated launchd daemon readiness', () => {
     expect(m.disconnect).not.toHaveBeenCalled()
     expect(m.bootout).not.toHaveBeenCalled()
     expect(getMacDaemonLaunchStrategy()).toBe('launchd')
+    expect(m.unlock).toHaveBeenCalledTimes(1)
     await handle?.shutdown()
     expect(m.terminate).toHaveBeenCalledWith(host)
   })
@@ -82,6 +94,7 @@ describe('authenticated launchd daemon readiness', () => {
     m.identity.mockReturnValue({ ...identity, launchNonce: 'winner' })
     await expect(launchMacDaemon(options)).rejects.toBeInstanceOf(DaemonEndpointUnavailableError)
     expect(m.bootout).toHaveBeenCalledExactlyOnceWith(host)
+    expect(m.unlock).toHaveBeenCalledTimes(1)
     expect(m.lease).not.toHaveBeenCalled()
   })
   it('keeps the authenticated pair alive while launchd inspection is temporarily unverifiable', async () => {
@@ -124,9 +137,9 @@ describe('authenticated launchd daemon readiness', () => {
     m.identity.mockReturnValue(null)
     m.inspect.mockResolvedValue({ status: 'unverifiable' })
     m.bootout.mockResolvedValue(false)
-    const pending = launchMacDaemon(options)
+    const pending = expect(launchMacDaemon(options)).rejects.toThrow('Cannot safely fall back')
     await vi.advanceTimersByTimeAsync(16_000)
-    await expect(pending).resolves.toBeNull()
+    await pending
     expect(m.lease).not.toHaveBeenCalled()
     expect(m.bootout).toHaveBeenCalledExactlyOnceWith(host)
     vi.useRealTimers()
