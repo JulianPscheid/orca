@@ -6,6 +6,7 @@ import {
 import { isStartupDiagnosticsEnabled, logStartupDiagnostic } from '../startup/startup-diagnostics'
 import { checkDaemonHealth } from './daemon-health'
 import { collectPinnedDaemonVersions, pruneOldDaemonHosts } from './daemon-host-relocation'
+import { pruneMacDaemonHosts } from './daemon-mac-launchd-job'
 import {
   cleanupFailedDaemonAdoption,
   releaseDaemonAdoptionLease,
@@ -65,6 +66,7 @@ export async function initDaemonPtyProvider(
   const info = await newSpawner.ensureRunning()
   // Why: reclaim superseded daemon-host copies on EVERY launch (spawns are rare), keeping current + live-daemon-pinned versions.
   pruneOldDaemonHosts(collectPinnedDaemonVersions(runtimeDir))
+  void pruneMacDaemonHosts()
   const launchMode = newSpawner.getHandle()?.mode
   logDaemonMilestone('daemon-current-ready')
   if (signal?.aborted) {

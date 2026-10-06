@@ -1,11 +1,9 @@
-// Answers the one question the running daemon cannot (STA-7948): would a daemon forked by THIS
-// app, right now, be able to list this folder? macOS attributes a TCC grant to the process that
-// forked the child, so only a fresh child of the current app binary can tell the user whether
-// restarting the terminal service is the remedy or whether they must re-allow Orca first.
+// Probe the permission subject a fresh daemon would use, including the launchd-owned Helper.
 
 import { isAbsolute } from 'node:path'
 import { runProcess } from '../../shared/child-process/run-process'
 import type { DirectoryEnumerationOutcome } from './directory-enumeration-probe'
+import { probeMacDaemonFolder } from './daemon-mac-folder-probe'
 
 /** `unknown` keeps "the probe could not answer" apart from every verdict it could have returned. */
 export type FreshDaemonFolderAccess = DirectoryEnumerationOutcome | 'unknown'
@@ -58,8 +56,7 @@ function parseProbeOutcome(stdout: string): FreshDaemonFolderAccess {
 }
 
 /**
- * Never throws and never outlives its deadline: this runs off the spawn path, and a folder whose
- * readability we cannot establish must read as `unknown` rather than as either verdict.
+ * Bounded subprocess waits run off the spawn path; inconclusive access is `unknown`.
  */
 export async function probeFolderAccessForFreshDaemon(
   path: string
@@ -70,6 +67,10 @@ export async function probeFolderAccessForFreshDaemon(
     return 'unknown'
   }
   try {
+    const macOutput = await probeMacDaemonFolder(PROBE_SCRIPT, path, probeEnvironment())
+    if (macOutput !== undefined) {
+      return macOutput === null ? 'unknown' : parseProbeOutcome(macOutput)
+    }
     const result = await runProcess({
       program: process.execPath,
       args: ['-e', PROBE_SCRIPT, path],

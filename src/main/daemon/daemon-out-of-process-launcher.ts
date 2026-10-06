@@ -24,6 +24,7 @@ import {
 } from './daemon-spawner'
 import { PROTOCOL_VERSION } from './types'
 import { prepareDaemonReplacement } from './daemon-replacement-preflight'
+import { launchMacDaemon } from './daemon-mac-launch'
 
 // Why: the adapter decides a runtime resolver replacement, but the launcher completes it — and by
 // then the daemon has usually self-retired (dropping its last authenticated client is enough), so
@@ -123,6 +124,19 @@ export function createOutOfProcessLauncher(
       const forkEntryPath = relocatedHost ? relocatedHost.entryPath : entryPath
       let launched
       try {
+        const macHandle = await launchMacDaemon({
+          entryPath,
+          forkEntryPath,
+          userDataPath,
+          socketPath,
+          tokenPath,
+          pidPath,
+          launchNonce,
+          macosLoginSessionWatch
+        })
+        if (macHandle) {
+          return macHandle
+        }
         launched = await launchDaemonChild({
           entryPath,
           forkEntryPath,

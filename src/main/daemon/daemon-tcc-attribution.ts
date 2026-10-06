@@ -34,9 +34,8 @@ function getMacDaemonTccAttributionCacheKey(
 }
 
 /**
- * macOS pins a process's TCC "responsible process" to the binary that forked it,
- * by file reference. If that binary path disappears while the daemon survives, tccd
- * cannot resolve the grant subject for the daemon's terminals (STA-3491).
+ * Legacy forks record the launching app; launchd-owned daemons record their clone Helper.
+ * Path existence is diagnostic attribution evidence, not a protected-folder access verdict.
  */
 export async function getMacDaemonTccAttributionHealth(
   runtimeDir: string,

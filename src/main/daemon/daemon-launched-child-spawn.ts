@@ -16,7 +16,10 @@ export type DaemonChildSpawnOptions = {
   macosLoginSessionWatch: boolean
 }
 
-function buildDaemonScriptArgs(options: DaemonChildSpawnOptions): string[] {
+export function buildDaemonScriptArgs(
+  options: DaemonChildSpawnOptions,
+  responsibleExecPath = process.execPath
+): string[] {
   const { socketPath, tokenPath, pidPath, launchNonce, entryPath, macosLoginSessionWatch } = options
   return [
     '--socket',
@@ -32,7 +35,7 @@ function buildDaemonScriptArgs(options: DaemonChildSpawnOptions): string[] {
     '--app-version',
     getAppEnvironment().getVersion(),
     '--spawner-exec-path',
-    process.execPath,
+    responsibleExecPath,
     ...(macosLoginSessionWatch ? ['--login-session-watch'] : []),
     ...daemonLogArgs()
   ]

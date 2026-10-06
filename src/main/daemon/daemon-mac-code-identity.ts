@@ -3,6 +3,7 @@
 
 import { runProcess } from '../../shared/child-process/run-process'
 import type { DaemonCodeIdentity } from '../../shared/daemon-adoption-telemetry'
+import { isOwnedMacDaemonExecutable } from './daemon-mac-host'
 
 const CODESIGN_TIMEOUT_MS = 3_000
 
@@ -20,7 +21,10 @@ export function classifyCodesignDisplayOutput(
     if (line.startsWith('Executable=')) {
       const executablePath = line.slice('Executable='.length).trim()
       if (executablePath.length > 0) {
-        return PARKED_BUNDLE_PATTERN.test(executablePath) ? 'parked' : 'resolved'
+        return !isOwnedMacDaemonExecutable(executablePath) &&
+          PARKED_BUNDLE_PATTERN.test(executablePath)
+          ? 'parked'
+          : 'resolved'
       }
     }
   }
