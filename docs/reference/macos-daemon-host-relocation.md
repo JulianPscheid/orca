@@ -79,9 +79,10 @@ An authenticated different-nonce endpoint winner is adopted normally even if the
 attempt's lifetime is unverifiable; the losing host and startup payload remain available.
 
 Pruning ignores canonical PID files entirely. It needs a readable generation record, the
-matching launchd target and executable, no current PID, and a recorded exit code or
-terminating signal in the
-exited job. A private retirement record saves this evidence before bootout and records successful
+matching launchd target and executable, no current PID, and a recorded exit code,
+terminating signal or `JETSAM_*` exit reason in the non-running job. Only top-level service
+fields count; a current PID takes precedence over historical exit evidence. A private retirement
+record saves this evidence before bootout and records successful
 removal afterward, so later pruning can reclaim an already removed job. A corrupt or incomplete
 record never authorizes deletion. Each generation has its own lock serializing its startup,
 probes and pruning across apps; new generations do not share a global startup lock.
@@ -109,8 +110,10 @@ that process is responsible.
 Measured-denial recovery (#21923) remains. Its folder read now prompts through a separate
 one-shot launchd job using the actual daemon's existing immutable bundle. Focus refreshes
 never clone or verify another full app and return within a three-second overall response deadline.
-The explicit Fix reserves the generation before resetting its TCC row, so a busy probe cannot
-clear a grant without starting the remedy. It allows sixty seconds for a response.
+The explicit Fix reserves the generation and successfully submits its prompt job before resetting
+the TCC row. The child waits for reset success before reading; failed submission leaves the grant
+untouched, and failed reset makes the child exit without a folder read. It allows sixty seconds
+for a response.
 A live read may own a consent sheet: neither deadline signals or kills it. It continues under
 its pin, checked once per second after the deadline, until a response produces positive exit
 and permits cleanup. Inconclusive job evidence retains the pin. An unanswered prompt or a

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { validate } from '../telemetry/validator'
+import type { MacDaemonFolderProbeReservation } from './daemon-mac-folder-probe'
 
 const {
   trackMock,
@@ -68,7 +69,17 @@ beforeEach(() => {
   unlockMock.mockReset()
   lockMock.mockReset().mockReturnValue(unlockMock)
   probeHostMock.mockReset().mockReturnValue(undefined)
-  launchdProbeMock.mockReset().mockResolvedValue('ok')
+  launchdProbeMock
+    .mockReset()
+    .mockImplementation(
+      async (_path: string, options: { reservation?: MacDaemonFolderProbeReservation }) => {
+        if (options.reservation?.beforeRead && !(await options.reservation.beforeRead())) {
+          options.reservation.release()
+          return 'unknown'
+        }
+        return 'ok'
+      }
+    )
   trackMock.mockReset()
   getPathMock.mockReset().mockReturnValue('/Applications/Orca.app/Contents/MacOS/Orca')
   opendirMock.mockReset().mockResolvedValue(fakeDir())
@@ -242,7 +253,7 @@ describe('resetFolderAccessForDaemon runs the remedy', () => {
 // Nobody has verified this remedy on an affected machine, so the re-probe's verdict is the
 // feature's only evidence. It must leave main as a valid event every time.
 describe('launchd folder recovery', () => {
-  it('resets the measured outer subject of the daemon bundle, then prompts through launchd', async () => {
+  it('resets the measured outer subject only from the submitted launchd probe', async () => {
     probeHostMock.mockReturnValue({
       generationDir: '/owned/uuid',
       execPath: '/owned/uuid/Orca.app/Contents/Frameworks/Orca Helper.app/Contents/MacOS/Helper'
@@ -256,8 +267,15 @@ describe('launchd folder recovery', () => {
     expect(opendirMock).not.toHaveBeenCalled()
     expect(launchdProbeMock).toHaveBeenCalledWith('/Users/alice/Documents/repo', {
       timeoutMs: 60_000,
-      reservation: { host: probeHostMock.mock.results[0].value, release: unlockMock }
+      reservation: {
+        host: probeHostMock.mock.results[0].value,
+        release: unlockMock,
+        beforeRead: expect.any(Function)
+      }
     })
+    expect(launchdProbeMock.mock.invocationCallOrder[0]).toBeLessThan(
+      resetMacosTccPermissionMock.mock.invocationCallOrder[0]
+    )
     expect(refreshProbeMock).toHaveBeenCalledWith(DAEMON, { force: true })
   })
   it('does not reset or read when the packaged subject is unverifiable', async () => {
@@ -276,7 +294,7 @@ describe('launchd folder recovery', () => {
     expect(resetMacosTccPermissionMock).not.toHaveBeenCalled()
     expect(launchdProbeMock).not.toHaveBeenCalled()
   })
-  it('releases the reservation when reset fails before prompting', async () => {
+  it('leaves probe cleanup responsible for the reservation when reset fails', async () => {
     probeHostMock.mockReturnValue({
       generationDir: '/owned/uuid',
       execPath: '/owned/uuid/Orca.app/Helper'
@@ -284,13 +302,27 @@ describe('launchd folder recovery', () => {
     resetMacosTccPermissionMock.mockResolvedValue({ ok: false })
     expect(await resetFolderAccessForDaemon(DAEMON)).toEqual({ outcome: 'reset_failed' })
     expect(unlockMock).toHaveBeenCalledOnce()
+    expect(refreshProbeMock).not.toHaveBeenCalled()
+  })
+  it('never resets the grant when the prompt job is rejected before its callback', async () => {
+    probeHostMock.mockReturnValue({
+      generationDir: '/owned/uuid',
+      execPath: '/owned/uuid/Orca.app/Helper'
+    })
+    launchdProbeMock.mockResolvedValue('unknown')
+    expect(await resetFolderAccessForDaemon(DAEMON)).toEqual({ outcome: 'reset_failed' })
+    expect(resetMacosTccPermissionMock).not.toHaveBeenCalled()
+    expect(refreshProbeMock).not.toHaveBeenCalled()
   })
   it('does not re-probe an unanswered launchd prompt or report stored denial as its outcome', async () => {
     probeHostMock.mockReturnValue({
       generationDir: '/owned/uuid',
       execPath: '/owned/uuid/Orca.app/Helper'
     })
-    launchdProbeMock.mockResolvedValue('unknown')
+    launchdProbeMock.mockImplementation(async (_path, options) => {
+      await options.reservation.beforeRead()
+      return 'unknown'
+    })
     await resetFolderAccessForDaemon(DAEMON)
     expect(refreshProbeMock).not.toHaveBeenCalled()
     expect(trackMock).toHaveBeenCalledWith('daemon_folder_access_notice', {

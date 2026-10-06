@@ -11,6 +11,7 @@ export type MacLaunchdJobEvidence = ProcessLivenessVerdict & {
   pid?: number
   exitCode?: number
   exitSignal?: number
+  exitReason?: string
   serviceNotFound?: true
 }
 
@@ -106,23 +107,29 @@ export async function bootstrapMacLaunchdJob(
 export function classifyMacLaunchdJob(output: string, job: MacLaunchdJob): MacLaunchdJobEvidence {
   if (
     !output.startsWith(`${job.jobTarget} = {`) ||
-    !output.split('\n').some((line) => line.trim() === `program = ${job.execPath}`)
+    !output.split('\n').some((line) => line === `\tprogram = ${job.execPath}`)
   ) {
     return { status: 'unverifiable', reason: 'launchd job identity could not be verified' }
   }
-  const pid = /^\s*pid = (\d+)\s*$/m.exec(output)
+  const pid = /^\tpid = (\d+)[\t ]*$/m.exec(output)
   if (pid && Number(pid[1]) > 0) {
     return { status: 'live', pid: Number(pid[1]) }
   }
-  const exit = /^\s*last exit code = (-?\d+)\s*$/m.exec(output)
-  const signal = /^\s*last terminating signal = [^:\r\n]+: (\d+)\s*$/m.exec(output)
+  // launchctl indents service fields once, nested dictionary fields twice.
+  const exit = /^\tlast exit code = (-?\d+)[\t ]*$/m.exec(output)
+  const signal = /^\tlast terminating signal = [^:\r\n]+: (\d+)[\t ]*$/m.exec(output)
+  const reason = /^\tlast exit reason = (JETSAM_[A-Z0-9_]+)[\t ]*$/m.exec(output)
   if (
-    /^\s*state = (?:not running|exited)\s*$/m.test(output) &&
-    (exit || (signal && Number(signal[1]) > 0))
+    /^\tstate = (?:not running|exited)[\t ]*$/m.test(output) &&
+    (exit || (signal && Number(signal[1]) > 0) || reason)
   ) {
     return {
       status: 'exited',
-      ...(exit ? { exitCode: Number(exit[1]) } : { exitSignal: Number(signal?.[1]) })
+      ...(exit
+        ? { exitCode: Number(exit[1]) }
+        : signal && Number(signal[1]) > 0
+          ? { exitSignal: Number(signal[1]) }
+          : { exitReason: reason?.[1] })
     }
   }
   return { status: 'unverifiable', reason: 'launchd has no positive exit evidence' }

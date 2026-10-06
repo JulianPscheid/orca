@@ -121,20 +121,34 @@ export async function resetFolderAccessForDaemon(
     return { outcome: 'unsupported' }
   }
   let handedOff = false
+  let resetSucceeded = false
+  const service = TCC_SERVICE_BY_CWD_CLASS[target.cwdClass]
+  const resetPermission = async (): Promise<boolean> => {
+    resetSucceeded = (await resetMacosTccPermission(service, bundleId)).ok
+    return resetSucceeded
+  }
   let prompted: boolean
   try {
-    if (!(await resetMacosTccPermission(TCC_SERVICE_BY_CWD_CLASS[target.cwdClass], bundleId)).ok) {
-      return { outcome: 'reset_failed' }
+    if (host && unlock) {
+      handedOff = true
+      prompted = await promptByReadingFolder(target.canonicalPath, {
+        host,
+        release: unlock,
+        beforeRead: resetPermission
+      })
+    } else {
+      if (!(await resetPermission())) {
+        return { outcome: 'reset_failed' }
+      }
+      prompted = await promptByReadingFolder(target.canonicalPath)
     }
-    handedOff = host !== undefined
-    prompted = await promptByReadingFolder(
-      target.canonicalPath,
-      host && unlock ? { host, release: unlock } : undefined
-    )
   } finally {
     if (!handedOff) {
       unlock?.()
     }
+  }
+  if (!resetSucceeded) {
+    return { outcome: 'reset_failed' }
   }
   // Why no probe once the deadline passes: the sheet is still up, and a probe under it would read
   // as denied — a verdict about the unanswered prompt, not about the permission.

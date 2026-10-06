@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { runInNewContext } from 'node:vm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { probeMacDaemonFolder } from './daemon-mac-folder-probe'
 import { setAppEnvironment } from '../../shared/app-environment'
+import { MacLaunchdBootstrapError } from './daemon-mac-bootstrap-error'
 
 const m = vi.hoisted(() => ({
   gate: vi.fn(),
@@ -94,6 +96,71 @@ describe('fresh folder permission subject', () => {
     m.managedPath.mockReturnValue(true)
     await expect(probeMacDaemonFolder('script', '/Documents', {})).resolves.toBeNull()
     expect(m.bootstrap).not.toHaveBeenCalled()
+  })
+  it.each(['not-submitted', 'rejected'] as const)(
+    'does not reset before a %s probe job',
+    async (disposition) => {
+      const beforeRead = vi.fn(async () => true)
+      const release = vi.fn()
+      m.bootstrap.mockRejectedValue(new MacLaunchdBootstrapError('failed', disposition))
+      await expect(
+        probeMacDaemonFolder('script', '/Documents', {}, 60_000, {
+          host: m.find(),
+          release,
+          beforeRead
+        })
+      ).resolves.toBeNull()
+      expect(beforeRead).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledOnce()
+    }
+  )
+  it.each([true, false])('holds the folder read until reset settles: %s', async (allowed) => {
+    const readFolder = vi.fn()
+    let poll: () => void = () => {}
+    m.bootstrap.mockImplementation(async (job, args) => {
+      runInNewContext(args[1], {
+        require: () => ({ readFileSync }),
+        process: {
+          argv: [process.execPath, ...args.slice(2)],
+          exit: () => {
+            throw new Error('cancelled')
+          }
+        },
+        readFolder,
+        setInterval: (callback: () => void) => {
+          poll = callback
+          return 1
+        },
+        clearInterval: () => {}
+      })
+      poll()
+      expect(readFolder).not.toHaveBeenCalled()
+      writeFileSync(join(job.generationDir, 'stdout.log'), '{"outcome":"ok"}\n')
+    })
+    const beforeRead = vi.fn(async () => {
+      expect(m.bootstrap).toHaveResolved()
+      poll()
+      expect(readFolder).not.toHaveBeenCalled()
+      return allowed
+    })
+    m.inspect.mockImplementation(async () => {
+      try {
+        poll()
+        return { status: 'exited', exitCode: 0 }
+      } catch {
+        return { status: 'exited', exitCode: 1 }
+      }
+    })
+    const release = vi.fn()
+    const result = await probeMacDaemonFolder('readFolder()', '/Documents', {}, 60_000, {
+      host: m.find(),
+      release,
+      beforeRead
+    })
+    expect(beforeRead).toHaveBeenCalledOnce()
+    expect(readFolder).toHaveBeenCalledTimes(allowed ? 1 : 0)
+    expect(result).toBe(allowed ? '{"outcome":"ok"}\n' : null)
+    expect(release).toHaveBeenCalledOnce()
   })
   it('leaves a pending consent read alive after the UI deadline and cleans up when answered', async () => {
     vi.useFakeTimers()

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getAppEnvironment } from '../../shared/app-environment'
 import { readDaemonPidRecord } from './daemon-endpoint-incarnation'
@@ -12,6 +12,7 @@ import {
   type MacDaemonHost
 } from './daemon-mac-host'
 import { lockMacDaemonHost } from './daemon-mac-host-lock'
+import { PRIVATE_FILE_MODE } from './daemon-private-file-modes'
 import { bootoutMacLaunchdJob, retireFailedMacLaunchdJob } from './daemon-mac-job-retirement'
 import {
   bootstrapMacLaunchdJob,
@@ -19,7 +20,11 @@ import {
   type MacLaunchdJobEvidence
 } from './daemon-mac-launchd-job'
 
-export type MacDaemonFolderProbeReservation = { host: MacDaemonHost; release: () => void }
+export type MacDaemonFolderProbeReservation = {
+  host: MacDaemonHost
+  release: () => void
+  beforeRead?: () => Promise<boolean>
+}
 
 /** Undefined is a fork subject; null means the packaged daemon's subject is unverifiable. */
 export function getMacDaemonFolderProbeHost(): MacDaemonHost | null | undefined {
@@ -57,6 +62,10 @@ export async function probeMacDaemonFolder(
     jobTarget: `gui/${process.getuid?.()}/com.stablyai.orca.folder-probe.${generation}`
   }
   const deadlineMs = Date.now() + timeoutMs
+  const gate = join(job.generationDir, 'read-permitted')
+  const beforeRead = reservation?.beforeRead
+  // Keep the launched subject idle until reset succeeds; a failed reset exits without a read.
+  const gatedScript = `const t=setInterval(()=>{let p;try{p=require('node:fs').readFileSync(process.argv[2],'utf8')}catch(e){if(e.code==='ENOENT')return;process.exit(1)}clearInterval(t);if(p!=='read')process.exit(1);${script}},50)`
   let timer: NodeJS.Timeout | undefined
   const run = async (): Promise<string | null> => {
     let attempted = false
@@ -67,11 +76,23 @@ export async function probeMacDaemonFolder(
       attempted = true
       await bootstrapMacLaunchdJob(
         job,
-        ['-e', script, path],
+        beforeRead ? ['-e', gatedScript, path, gate] : ['-e', script, path],
         getAppEnvironment().getPath('userData'),
         env,
         deadlineMs
       )
+      if (beforeRead) {
+        let permitted = false
+        try {
+          permitted = Date.now() < deadlineMs && (await beforeRead())
+        } finally {
+          writeFileSync(`${gate}.staging`, permitted ? 'read' : 'cancel', {
+            flag: 'wx',
+            mode: PRIVATE_FILE_MODE
+          })
+          renameSync(`${gate}.staging`, gate)
+        }
+      }
       while (true) {
         const remaining = deadlineMs - Date.now()
         evidence = await inspectMacLaunchdJob(job, remaining > 0 ? deadlineMs : undefined)

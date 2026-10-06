@@ -23,7 +23,7 @@ const platform = process.platform
 const scratch = join(platform === 'darwin' ? '/tmp' : tmpdir(), 'orca-mac-reloc')
 const generation = '11111111-1111-4111-8111-111111111111'
 function output(state: string): string {
-  return `${host.jobTarget} = {\n\tprogram = ${host.execPath}\n${state}\n}`
+  return `${host.jobTarget} = {\n\tprogram = ${host.execPath}\n\t${state.replaceAll('\n', '\n\t')}\n}`
 }
 beforeEach(() => {
   mkdirSync(scratch, { recursive: true })
@@ -112,6 +112,50 @@ describe('launchd lifetime reservation', () => {
     run.mockResolvedValue({ code: 0, stdout: output(state), timedOut: false })
     await pruneMacDaemonHosts()
     expect(existsSync(host.generationDir)).toBe(false)
+  })
+  it('reclaims a Jetsam idle exit with no numeric code and preserves a still-present PID', async () => {
+    const state = `state = not running
+last exit reason = JETSAM_REASON_MEMORY_IDLE_EXIT
+jetsam coalition = {
+\tID = 333098
+\ttype = jetsam
+\tstate = active
+\tactive count = 0
+}`
+    expect(classifyMacLaunchdJob(output(state), host)).toEqual({
+      status: 'exited',
+      exitReason: 'JETSAM_REASON_MEMORY_IDLE_EXIT'
+    })
+    expect(classifyMacLaunchdJob(output(`${state}\npid = 42`), host)).toEqual({
+      status: 'live',
+      pid: 42
+    })
+    run.mockResolvedValue({ code: 0, stdout: output(state), timedOut: false })
+    await pruneMacDaemonHosts()
+    expect(existsSync(host.generationDir)).toBe(false)
+  })
+  it.each([
+    'last exit code = 0',
+    'last terminating signal = Killed: 9',
+    'last exit reason = JETSAM_REASON_MEMORY_IDLE_EXIT'
+  ])('does not borrow nested exit evidence: %s', (exit) => {
+    const nested = `resource coalition = {\n\tstate = not running\n\t${exit}\n}`
+    expect(classifyMacLaunchdJob(output(`state = not running\n${nested}`), host).status).toBe(
+      'unverifiable'
+    )
+    expect(classifyMacLaunchdJob(output(`${exit}\n${nested}`), host).status).toBe('unverifiable')
+  })
+  it('keeps service absence unverifiable after submission', async () => {
+    run.mockResolvedValue({
+      code: 113,
+      stdout: '',
+      stderr: `Could not find service "${host.jobTarget.split('/').at(-1)}"`,
+      timedOut: false
+    })
+    expect(await inspectMacLaunchdJob(host)).toMatchObject({
+      status: 'unverifiable',
+      serviceNotFound: true
+    })
   })
   it('shutdown signals only its live job and retains positive exit evidence for pruning', async () => {
     run.mockResolvedValueOnce({ code: 0, stdout: output('state = running\npid = 42') })
