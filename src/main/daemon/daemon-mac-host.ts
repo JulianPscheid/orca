@@ -186,3 +186,19 @@ export function findOwnedMacDaemonHost(path: string): MacDaemonHost | null {
 export function isOwnedMacDaemonExecutable(path: string): boolean {
   return findOwnedMacDaemonHost(path) !== null
 }
+
+/** A damaged owned record must never become a legacy installed-app permission subject. */
+export function isMacDaemonHostPath(path: string): boolean {
+  const roots = [
+    macDaemonHostRoot(),
+    join(getAppEnvironment().getPath('userData'), MAC_DAEMON_HOST_SUBDIR)
+  ]
+  return roots.some((root) => {
+    try {
+      inside(root, path)
+      return true
+    } catch {
+      return false
+    }
+  })
+}

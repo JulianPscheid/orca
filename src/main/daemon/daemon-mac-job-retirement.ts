@@ -2,8 +2,41 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { inspectMacLaunchdJob, runMacLaunchctl, type MacLaunchdJob } from './daemon-mac-launchd-job'
 import { PRIVATE_FILE_MODE } from './daemon-private-file-modes'
+import { MacLaunchdBootstrapError } from './daemon-mac-bootstrap-error'
 
 const RETIREMENT_RECORD = 'retired.json'
+
+/** Missing service alone cannot prove exit after a successful or uncertain bootstrap. */
+export async function retireFailedMacLaunchdJob(
+  job: MacLaunchdJob,
+  error: unknown,
+  allowTermination = true
+): Promise<boolean> {
+  if (error instanceof MacLaunchdBootstrapError) {
+    const neverSubmitted = error.disposition === 'not-submitted'
+    const rejectedAndAbsent =
+      error.disposition === 'rejected' && (await inspectMacLaunchdJob(job)).serviceNotFound === true
+    if (neverSubmitted || rejectedAndAbsent) {
+      try {
+        writeFileSync(
+          join(job.generationDir, RETIREMENT_RECORD),
+          JSON.stringify({
+            jobTarget: job.jobTarget,
+            execPath: job.execPath,
+            exited: true,
+            removed: true
+          }),
+          { mode: PRIVATE_FILE_MODE }
+        )
+        return true
+      } catch {
+        /* Non-start is proven even if its durable storage record cannot be written. */
+      }
+      return true
+    }
+  }
+  return allowTermination ? bootoutMacLaunchdJob(job) : false
+}
 
 /** This survives bootout removing launchd's positive exit evidence. */
 export function hasRetiredMacLaunchdJob(job: MacLaunchdJob): boolean {

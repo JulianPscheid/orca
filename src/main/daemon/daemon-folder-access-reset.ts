@@ -8,7 +8,11 @@ import {
 import type { EventProps } from '../../shared/telemetry-events'
 import { readMacosBundleId, resetMacosTccPermission } from '../macos-tcc-reset'
 import { enumerateDirectoryOnce } from './directory-enumeration-probe'
-import { getMacDaemonFolderProbeHost } from './daemon-mac-folder-probe'
+import {
+  getMacDaemonFolderProbeHost,
+  type MacDaemonFolderProbeReservation
+} from './daemon-mac-folder-probe'
+import { lockMacDaemonHost } from './daemon-mac-host-lock'
 import { probeFolderAccessForFreshDaemon } from './daemon-folder-access-probe'
 import { track } from '../telemetry/client'
 import {
@@ -44,10 +48,16 @@ function runningAppBundlePath(): string {
 /** An unanswered macOS sheet must not keep the fix dialog busy for the rest of the session. */
 const PROMPT_DEADLINE_MS = 60_000
 
-async function promptByReadingFolder(path: string, launchd: boolean): Promise<boolean> {
-  if (launchd) {
+async function promptByReadingFolder(
+  path: string,
+  reservation?: MacDaemonFolderProbeReservation
+): Promise<boolean> {
+  if (reservation) {
     return (
-      (await probeFolderAccessForFreshDaemon(path, { timeoutMs: PROMPT_DEADLINE_MS })) !== 'unknown'
+      (await probeFolderAccessForFreshDaemon(path, {
+        timeoutMs: PROMPT_DEADLINE_MS,
+        reservation
+      })) !== 'unknown'
     )
   }
   let deadline: NodeJS.Timeout | undefined
@@ -106,10 +116,26 @@ export async function resetFolderAccessForDaemon(
   if (bundleId === null) {
     return { outcome: 'unsupported' }
   }
-  if (!(await resetMacosTccPermission(TCC_SERVICE_BY_CWD_CLASS[target.cwdClass], bundleId)).ok) {
-    return { outcome: 'reset_failed' }
+  const unlock = host ? lockMacDaemonHost(host) : undefined
+  if (host && !unlock) {
+    return { outcome: 'unsupported' }
   }
-  const prompted = await promptByReadingFolder(target.canonicalPath, host !== undefined)
+  let handedOff = false
+  let prompted: boolean
+  try {
+    if (!(await resetMacosTccPermission(TCC_SERVICE_BY_CWD_CLASS[target.cwdClass], bundleId)).ok) {
+      return { outcome: 'reset_failed' }
+    }
+    handedOff = host !== undefined
+    prompted = await promptByReadingFolder(
+      target.canonicalPath,
+      host && unlock ? { host, release: unlock } : undefined
+    )
+  } finally {
+    if (!handedOff) {
+      unlock?.()
+    }
+  }
   // Why no probe once the deadline passes: the sheet is still up, and a probe under it would read
   // as denied — a verdict about the unanswered prompt, not about the permission.
   if (prompted) {

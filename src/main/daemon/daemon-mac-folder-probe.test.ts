@@ -8,6 +8,7 @@ import { setAppEnvironment } from '../../shared/app-environment'
 const m = vi.hoisted(() => ({
   gate: vi.fn(),
   find: vi.fn(),
+  managedPath: vi.fn(),
   record: vi.fn(),
   bootstrap: vi.fn(),
   inspect: vi.fn(),
@@ -15,12 +16,16 @@ const m = vi.hoisted(() => ({
 }))
 vi.mock('./daemon-mac-host', () => ({
   isPackagedMacDaemonHost: m.gate,
-  findOwnedMacDaemonHost: m.find
+  findOwnedMacDaemonHost: m.find,
+  isMacDaemonHostPath: m.managedPath
 }))
 vi.mock('./daemon-endpoint-incarnation', () => ({ readDaemonPidRecord: m.record }))
 vi.mock('./daemon-launch-paths', () => ({ getDaemonRuntimeDir: () => '/profile/daemon' }))
 vi.mock('./daemon-spawner', () => ({ getDaemonPidPath: () => '/profile/pid' }))
-vi.mock('./daemon-mac-job-retirement', () => ({ bootoutMacLaunchdJob: m.bootout }))
+vi.mock('./daemon-mac-job-retirement', () => ({
+  bootoutMacLaunchdJob: m.bootout,
+  retireFailedMacLaunchdJob: m.bootout
+}))
 vi.mock('./daemon-mac-launchd-job', () => ({
   bootstrapMacLaunchdJob: m.bootstrap,
   inspectMacLaunchdJob: m.inspect
@@ -83,6 +88,25 @@ describe('fresh folder permission subject', () => {
     m.record.mockReturnValue(null)
     await expect(probeMacDaemonFolder('script', '/Documents', {})).resolves.toBeNull()
     expect(m.bootstrap).not.toHaveBeenCalled()
+  })
+  it('returns unknown for a damaged owned-host record instead of probing the installed app', async () => {
+    m.find.mockReturnValue(null)
+    m.managedPath.mockReturnValue(true)
+    await expect(probeMacDaemonFolder('script', '/Documents', {})).resolves.toBeNull()
+    expect(m.bootstrap).not.toHaveBeenCalled()
+  })
+  it('leaves a pending consent read alive after the UI deadline and cleans up when answered', async () => {
+    vi.useFakeTimers()
+    m.inspect.mockResolvedValue({ status: 'live', pid: 123 })
+    const pending = probeMacDaemonFolder('script', '/Documents', {}, 60_000)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await pending).toBeNull()
+    expect(m.bootout).not.toHaveBeenCalled()
+    expect(existsSync(join(dir, 'use-lock'))).toBe(true)
+    m.inspect.mockResolvedValue({ status: 'exited', exitCode: 0 })
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(m.bootout).toHaveBeenCalledTimes(1)
+    expect(existsSync(join(dir, 'use-lock'))).toBe(false)
   })
   it.each(['exit', 'bootstrap', 'output'])('returns unknown on %s failure', async (failure) => {
     if (failure === 'exit') {

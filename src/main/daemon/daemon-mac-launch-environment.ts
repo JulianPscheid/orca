@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import type { MacDaemonHost } from './daemon-mac-host'
 import { PRIVATE_FILE_MODE } from './daemon-private-file-modes'
 
-// PTYs inherit process.env; preload it before daemon modules read any configuration.
+// Preserve daemon-local configuration before modules load; PTY RPC environment can override it.
 const PRELOAD = `const fs=require('node:fs'),path=require('node:path');
 const file=path.join(__dirname,'launch-environment.json');
 const text=fs.readFileSync(file,'utf8');fs.unlinkSync(file);

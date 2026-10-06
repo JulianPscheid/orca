@@ -22,6 +22,9 @@ the full bundle size. No hardlinks, quarantine removal, or re-signing are used. 
 strict signature verification must pass before publication. The source bundle and runtime paths
 are resolved before cloning, including launches through a symlinked `.app`. An unsigned or damaged source
 fails open to the installed runtime. Metadata lives beside the sealed `.app`.
+`process.helperExecPath` is not documented in Electron's public process API; it was present and
+resolved to the real Helper on the shipped Electron binary in the packaged proof. If absent,
+materialization fails open without claiming protection.
 
 A temporary property list bootstraps a unique job in the GUI user's `launchd` domain. It
 uses `RunAtLoad` once, `KeepAlive=false`, and no demand sources. Nothing is installed in
@@ -34,9 +37,12 @@ If its lifetime is unverifiable, daemon initialization declines to race another 
 Only `ELECTRON_RUN_AS_NODE` enters the job's environment dictionary. PTY spawning still uses
 exactly the inherited user environment as its baseline: a private 0600 startup file transfers
 that snapshot, and a Node preload unlinks it before any daemon modules load. The launcher
-also removes an unconsumed payload on completion or failure. Values never enter plist/argv;
+also removes an unconsumed payload after readiness or verified non-start/exit. It leaves the
+snapshot available when cleanup cannot prove a starting process is gone. Values never enter plist/argv;
 the preload remains outside the signature seal. A crashed main before consumption can leave
-a private payload in an uncertain, retained generation. Job inspection has a bounded 256 KiB
+a private payload in an uncertain, retained generation indefinitely, including tokens inherited
+from a terminal launch. An uncertain non-crash launch can retain the same file. Daemon/probe logs
+have no rotation and also remain with retained generations. Job inspection has a bounded 256 KiB
 capture to accommodate launchd's own environment and diagnostic output.
 
 The logical `entryPath` still describes the installed build for freshness checks. On this
@@ -60,19 +66,26 @@ the daemon's endpoint-occupied exit code adopts the winner through the existing 
 Only the daemon can publish or replace the canonical endpoint; the launcher never removes it.
 
 Startup has a bounded assessment/readiness window. Failure removes only the attempt's unique
-job after positive exit, then retries the installed-runtime fork, with a diagnostic. Successful
+job after positive exit, then retries the installed-runtime fork, with a diagnostic. A preparation
+failure before submission, or a non-timed-out bootstrap rejection followed by the matching
+exit-113 service-not-found response, proves no job was loaded: the never-run generation is
+reclaimed immediately and the persistent installed-runtime fork runs. Service absence after a
+successful or uncertain bootstrap is not process-death evidence. Successful
 `bootout` alone is insufficient: it can return before process death. Shutdown first signals
 that unique job, waits within a bounded budget for positive launchd exit evidence, and only
 then removes it. An unverifiable lifetime retains the generation and withholds the fork.
 A fallback never reports a protected launch.
+An authenticated different-nonce endpoint winner is adopted normally even if the losing
+attempt's lifetime is unverifiable; the losing host and startup payload remain available.
 
 Pruning ignores canonical PID files entirely. It needs a readable generation record, the
 matching launchd target and executable, no current PID, and a recorded exit code or
 terminating signal in the
 exited job. A private retirement record saves this evidence before bootout and records successful
 removal afterward, so later pruning can reclaim an already removed job. A corrupt or incomplete
-record never authorizes deletion. A generation lock serializes probes and pruning across apps;
-the lock stays held until the probe output is read and its process positively retires.
+record never authorizes deletion. Each generation has its own lock serializing its startup,
+probes and pruning across apps; new generations do not share a global startup lock.
+The lock stays held until the probe output is read and its process positively retires.
 Running, delayed, missing, corrupt, timed-out, and otherwise unverifiable evidence retains
 the host. Concurrent launches, old protocols, PID reuse, and separate profiles cannot remove
 this reservation. Shutdown signals the specific job and waits for its exit, retaining its
@@ -81,6 +94,8 @@ job record as pruning evidence. There is no child-count reaper.
 This intentionally prefers storage retention to breaking live terminals. Reboot, externally
 removed jobs, interrupted bootstrap, or failed startup cleanup can leave generations without
 positive exit evidence. They are retained; this PR does not add an absence-based sweeper.
+Abandoned `.staging` trees are also retained: safely reclaiming them needs proof that neither
+their writer nor its copy child is still using them, beyond an age estimate.
 
 ## Permissions and recovery
 
@@ -93,11 +108,17 @@ that process is responsible.
 
 Measured-denial recovery (#21923) remains. Its folder read now prompts through a separate
 one-shot launchd job using the actual daemon's existing immutable bundle. Focus refreshes
-never clone or verify another full app and have a three-second overall deadline, including
-bootstrap, polling, output, and cleanup. The explicit Fix allows sixty seconds for consent.
-After the response deadline, bounded cleanup can continue with the generation still pinned.
+never clone or verify another full app and return within a three-second overall response deadline.
+The explicit Fix reserves the generation before resetting its TCC row, so a busy probe cannot
+clear a grant without starting the remedy. It allows sixty seconds for a response.
+A live read may own a consent sheet: neither deadline signals or kills it. It continues under
+its pin, checked once per second after the deadline, until a response produces positive exit
+and permits cleanup. Inconclusive job evidence retains the pin. An unanswered prompt or a
+crashed caller can therefore keep that probe and reservation indefinitely.
 An uncertain cleanup or crashed lock holder retains storage and returns unknown on later
-probes. Actual forked daemons keep the existing probe/prompt path. Missing owned-host evidence
+probes. An inconclusive focus refresh preserves a previously measured denial, keeping Reset
+available; an explicit post-reset unknown is still reported as unknown. Actual forked daemons
+keep the existing probe/prompt path. Missing or corrupt owned-host evidence
 is unknown, never a guessed permission subject. Code identity remains diagnostic.
 
 The same-build main-app Documents read succeeded before the launchd Helper's read. TCC then

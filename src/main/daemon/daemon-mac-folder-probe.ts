@@ -7,12 +7,19 @@ import { getDaemonRuntimeDir } from './daemon-launch-paths'
 import { getDaemonPidPath } from './daemon-spawner'
 import {
   findOwnedMacDaemonHost,
+  isMacDaemonHostPath,
   isPackagedMacDaemonHost,
   type MacDaemonHost
 } from './daemon-mac-host'
 import { lockMacDaemonHost } from './daemon-mac-host-lock'
-import { bootoutMacLaunchdJob } from './daemon-mac-job-retirement'
-import { bootstrapMacLaunchdJob, inspectMacLaunchdJob } from './daemon-mac-launchd-job'
+import { bootoutMacLaunchdJob, retireFailedMacLaunchdJob } from './daemon-mac-job-retirement'
+import {
+  bootstrapMacLaunchdJob,
+  inspectMacLaunchdJob,
+  type MacLaunchdJobEvidence
+} from './daemon-mac-launchd-job'
+
+export type MacDaemonFolderProbeReservation = { host: MacDaemonHost; release: () => void }
 
 /** Undefined is a fork subject; null means the packaged daemon's subject is unverifiable. */
 export function getMacDaemonFolderProbeHost(): MacDaemonHost | null | undefined {
@@ -23,7 +30,8 @@ export function getMacDaemonFolderProbeHost(): MacDaemonHost | null | undefined 
   if (!record?.spawnerExecPath) {
     return null
   }
-  return findOwnedMacDaemonHost(record.spawnerExecPath) ?? undefined
+  const host = findOwnedMacDaemonHost(record.spawnerExecPath)
+  return host ?? (isMacDaemonHostPath(record.spawnerExecPath) ? null : undefined)
 }
 
 /** Reuse the actual daemon's bundle; no copy or signature check occurs on a focus refresh. */
@@ -31,13 +39,14 @@ export async function probeMacDaemonFolder(
   script: string,
   path: string,
   env: NodeJS.ProcessEnv,
-  timeoutMs = 3_000
+  timeoutMs = 3_000,
+  reservation?: MacDaemonFolderProbeReservation
 ): Promise<string | null | undefined> {
-  const host = getMacDaemonFolderProbeHost()
+  const host = reservation?.host ?? getMacDaemonFolderProbeHost()
   if (!host) {
     return host
   }
-  const unlock = lockMacDaemonHost(host)
+  const unlock = reservation?.release ?? lockMacDaemonHost(host)
   if (!unlock) {
     return null
   }
@@ -51,6 +60,8 @@ export async function probeMacDaemonFolder(
   let timer: NodeJS.Timeout | undefined
   const run = async (): Promise<string | null> => {
     let attempted = false
+    let evidence: MacLaunchdJobEvidence | undefined
+    let failure: unknown
     try {
       mkdirSync(job.generationDir, { mode: 0o700 })
       attempted = true
@@ -61,8 +72,9 @@ export async function probeMacDaemonFolder(
         env,
         deadlineMs
       )
-      while (Date.now() < deadlineMs) {
-        const evidence = await inspectMacLaunchdJob(job, deadlineMs)
+      while (true) {
+        const remaining = deadlineMs - Date.now()
+        evidence = await inspectMacLaunchdJob(job, remaining > 0 ? deadlineMs : undefined)
         if (evidence.status === 'exited') {
           if (evidence.exitCode !== 0) {
             return null
@@ -70,16 +82,25 @@ export async function probeMacDaemonFolder(
           const output = readFileSync(join(job.generationDir, 'stdout.log'), 'utf8')
           return Buffer.byteLength(output) <= 1024 ? output : null
         }
+        if (remaining <= 0 && evidence.status !== 'live') {
+          return null
+        }
         await new Promise((resolve) =>
-          setTimeout(resolve, Math.min(100, Math.max(0, deadlineMs - Date.now())))
+          setTimeout(resolve, remaining > 0 ? Math.min(100, remaining) : 1_000).unref()
         )
       }
-      return null
-    } catch {
+    } catch (error) {
+      failure = error
       return null
     } finally {
       // After the caller's deadline cleanup continues off the UI path, with the bundle still pinned.
-      if (!attempted || (await bootoutMacLaunchdJob(job))) {
+      // A live read may own a consent sheet; the UI deadline must not terminate it.
+      const retired =
+        !attempted ||
+        (failure
+          ? await retireFailedMacLaunchdJob(job, failure, false)
+          : evidence?.status === 'exited' && (await bootoutMacLaunchdJob(job)))
+      if (retired) {
         try {
           rmSync(job.generationDir, { recursive: true, force: true })
           unlock()

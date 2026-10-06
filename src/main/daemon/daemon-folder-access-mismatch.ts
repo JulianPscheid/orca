@@ -79,17 +79,23 @@ function freshDaemonAccessFrom(outcome: FreshDaemonFolderAccess): FreshDaemonAcc
   return outcome === 'denied' ? 'denied' : 'unknown'
 }
 
-async function probeStoredEntry(entry: StoredMismatch): Promise<void> {
+async function probeStoredEntry(entry: StoredMismatch, force: boolean): Promise<void> {
   const outcome = await probeFolderAccessForFreshDaemon(entry.canonicalPath)
   // Why the identity compare: a later spawn may have replaced the entry while the child ran.
   if (stored !== entry) {
     return
   }
-  stored = { ...entry, freshDaemonAccess: freshDaemonAccessFrom(outcome), probedAtMs: Date.now() }
+  const access = freshDaemonAccessFrom(outcome)
+  stored = {
+    ...entry,
+    freshDaemonAccess:
+      !force && access === 'unknown' && entry.freshDaemonAccess === 'denied' ? 'denied' : access,
+    probedAtMs: Date.now()
+  }
 }
 
-function startProbe(entry: StoredMismatch): Promise<void> {
-  const run = probeStoredEntry(entry).catch(() => {})
+function startProbe(entry: StoredMismatch, force = false): Promise<void> {
+  const run = probeStoredEntry(entry, force).catch(() => {})
   probeInFlight = run
   void run.then(() => {
     if (probeInFlight === run) {
@@ -188,7 +194,7 @@ export async function refreshDaemonFolderAccessProbe(
   ) {
     return
   }
-  await (force ? startProbe(entry) : (probeInFlight ?? startProbe(entry)))
+  await (force ? startProbe(entry, true) : (probeInFlight ?? startProbe(entry)))
 }
 
 /**

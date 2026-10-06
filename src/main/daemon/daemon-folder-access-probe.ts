@@ -3,7 +3,10 @@
 import { isAbsolute } from 'node:path'
 import { runProcess } from '../../shared/child-process/run-process'
 import type { DirectoryEnumerationOutcome } from './directory-enumeration-probe'
-import { probeMacDaemonFolder } from './daemon-mac-folder-probe'
+import {
+  probeMacDaemonFolder,
+  type MacDaemonFolderProbeReservation
+} from './daemon-mac-folder-probe'
 
 /** `unknown` keeps "the probe could not answer" apart from every verdict it could have returned. */
 export type FreshDaemonFolderAccess = DirectoryEnumerationOutcome | 'unknown'
@@ -60,11 +63,12 @@ function parseProbeOutcome(stdout: string): FreshDaemonFolderAccess {
  */
 export async function probeFolderAccessForFreshDaemon(
   path: string,
-  options: { timeoutMs?: number } = {}
+  options: { timeoutMs?: number; reservation?: MacDaemonFolderProbeReservation } = {}
 ): Promise<FreshDaemonFolderAccess> {
   // Why absolute-only: the path is the child's sole argv entry, and Node parses a leading-dash
   // argument as one of its own options.
   if (!isAbsolute(path)) {
+    options.reservation?.release()
     return 'unknown'
   }
   try {
@@ -72,7 +76,8 @@ export async function probeFolderAccessForFreshDaemon(
       PROBE_SCRIPT,
       path,
       probeEnvironment(),
-      options.timeoutMs ?? PROBE_DEADLINE_MS
+      options.timeoutMs ?? PROBE_DEADLINE_MS,
+      options.reservation
     )
     if (macOutput !== undefined) {
       return macOutput === null ? 'unknown' : parseProbeOutcome(macOutput)

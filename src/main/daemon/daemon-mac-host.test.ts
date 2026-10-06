@@ -17,6 +17,7 @@ import { setAppEnvironment } from '../../shared/app-environment'
 import {
   materializeMacDaemonHost,
   isOwnedMacDaemonExecutable,
+  isMacDaemonHostPath,
   MAC_DAEMON_HOST_RECORD
 } from './daemon-mac-host'
 import { classifyCodesignDisplayOutput } from './daemon-mac-code-identity'
@@ -137,6 +138,10 @@ describe('macOS immutable daemon host', () => {
     )
     expect(existsSync(second.execPath)).toBe(true)
     expect(isOwnedMacDaemonExecutable(first.execPath)).toBe(false)
+    expect(isMacDaemonHostPath(first.execPath)).toBe(true)
+    rmSync(second.execPath)
+    expect(isMacDaemonHostPath(second.execPath)).toBe(true)
+    expect(isMacDaemonHostPath(entry)).toBe(false)
   })
   it.each(['win32', 'linux'])('never copies on %s', async (platform) => {
     prop('platform', platform)

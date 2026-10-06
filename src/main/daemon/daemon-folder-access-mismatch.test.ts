@@ -192,6 +192,16 @@ describe('freshDaemonAccess', () => {
 })
 
 describe('refreshDaemonFolderAccessProbe', () => {
+  it('keeps measured denial on inconclusive focus polls but reports a forced inconclusive refresh as unknown', async () => {
+    probeMock.mockResolvedValue('denied')
+    await recordAndProbe(DAEMON)
+    vi.setSystemTime(Date.now() + 6_000)
+    probeMock.mockResolvedValue('unknown')
+    await refreshDaemonFolderAccessProbe(DAEMON)
+    expect(getDaemonFolderAccessMismatch(DAEMON)?.freshDaemonAccess).toBe('denied')
+    await refreshDaemonFolderAccessProbe(DAEMON, { force: true })
+    expect(getDaemonFolderAccessMismatch(DAEMON)?.freshDaemonAccess).toBe('unknown')
+  })
   it('re-probes a denial so step one can complete itself', async () => {
     probeMock.mockResolvedValue('denied')
     await recordAndProbe(DAEMON)

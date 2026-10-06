@@ -4,12 +4,14 @@ import { runProcess } from '../../shared/child-process/run-process'
 import type { ProcessLivenessVerdict } from './daemon-incarnation-evidence-types'
 import type { MacDaemonHost } from './daemon-mac-host'
 import { PRIVATE_FILE_MODE } from './daemon-private-file-modes'
+import { MacLaunchdBootstrapError } from './daemon-mac-bootstrap-error'
 
 export type MacLaunchdJob = MacDaemonHost & { jobTarget: string }
 export type MacLaunchdJobEvidence = ProcessLivenessVerdict & {
   pid?: number
   exitCode?: number
   exitSignal?: number
+  serviceNotFound?: true
 }
 
 function xml(text: string): string {
@@ -67,19 +69,37 @@ export async function bootstrapMacLaunchdJob(
   deadlineMs?: number
 ): Promise<void> {
   const plist = join(job.generationDir, `${job.jobTarget.split('/').at(-1)}.plist`)
-  writeFileSync(plist, buildMacLaunchdPlist(job, args, cwd, env), {
-    flag: 'wx',
-    mode: PRIVATE_FILE_MODE
-  })
-  for (const name of ['stdout.log', 'stderr.log']) {
-    writeFileSync(join(job.generationDir, name), '', { flag: 'wx', mode: PRIVATE_FILE_MODE })
+  try {
+    writeFileSync(plist, buildMacLaunchdPlist(job, args, cwd, env), {
+      flag: 'wx',
+      mode: PRIVATE_FILE_MODE
+    })
+    for (const name of ['stdout.log', 'stderr.log']) {
+      writeFileSync(join(job.generationDir, name), '', { flag: 'wx', mode: PRIVATE_FILE_MODE })
+    }
+  } catch (cause) {
+    throw new MacLaunchdBootstrapError('launchd job was not submitted', 'not-submitted', { cause })
   }
-  const result = await runMacLaunchctl(
-    ['bootstrap', job.jobTarget.slice(0, job.jobTarget.lastIndexOf('/')), plist],
-    deadlineMs
-  )
-  if (result.code !== 0 || result.timedOut) {
-    throw new Error(`launchd bootstrap failed: ${result.stderr}`)
+  try {
+    const result = await runMacLaunchctl(
+      ['bootstrap', job.jobTarget.slice(0, job.jobTarget.lastIndexOf('/')), plist],
+      deadlineMs
+    )
+    if (result.code !== 0 || result.timedOut) {
+      const rejected =
+        typeof result.code === 'number' && !result.timedOut && !result.outputTruncated
+      throw new MacLaunchdBootstrapError(
+        `launchd bootstrap failed: ${result.stderr}`,
+        rejected ? 'rejected' : 'unverifiable'
+      )
+    }
+  } catch (cause) {
+    if (cause instanceof MacLaunchdBootstrapError) {
+      throw cause
+    }
+    throw new MacLaunchdBootstrapError('launchd bootstrap outcome is unknown', 'unverifiable', {
+      cause
+    })
   }
 }
 
@@ -116,6 +136,15 @@ export async function inspectMacLaunchdJob(
     const result = await runMacLaunchctl(['print', job.jobTarget], deadlineMs)
     if (result.code === 0 && !result.timedOut && !result.outputTruncated) {
       return classifyMacLaunchdJob(result.stdout, job)
+    }
+    const missing = `Could not find service "${job.jobTarget.split('/').at(-1)}"`
+    if (
+      result.code === 113 &&
+      !result.timedOut &&
+      !result.outputTruncated &&
+      result.stderr.includes(missing)
+    ) {
+      return { status: 'unverifiable', serviceNotFound: true, reason: 'launchd service is absent' }
     }
   } catch {
     /* Missing contact does not prove process exit. */

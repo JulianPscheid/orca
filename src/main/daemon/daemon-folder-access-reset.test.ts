@@ -30,6 +30,8 @@ const {
 }))
 
 vi.mock('./daemon-mac-folder-probe', () => ({ getMacDaemonFolderProbeHost: probeHostMock }))
+const { lockMock, unlockMock } = vi.hoisted(() => ({ lockMock: vi.fn(), unlockMock: vi.fn() }))
+vi.mock('./daemon-mac-host-lock', () => ({ lockMacDaemonHost: lockMock }))
 vi.mock('./daemon-folder-access-probe', () => ({
   probeFolderAccessForFreshDaemon: launchdProbeMock
 }))
@@ -63,6 +65,8 @@ function fakeDir(): { read: ReturnType<typeof vi.fn>; close: ReturnType<typeof v
 
 beforeEach(() => {
   setPlatform('darwin')
+  unlockMock.mockReset()
+  lockMock.mockReset().mockReturnValue(unlockMock)
   probeHostMock.mockReset().mockReturnValue(undefined)
   launchdProbeMock.mockReset().mockResolvedValue('ok')
   trackMock.mockReset()
@@ -251,7 +255,8 @@ describe('launchd folder recovery', () => {
     )
     expect(opendirMock).not.toHaveBeenCalled()
     expect(launchdProbeMock).toHaveBeenCalledWith('/Users/alice/Documents/repo', {
-      timeoutMs: 60_000
+      timeoutMs: 60_000,
+      reservation: { host: probeHostMock.mock.results[0].value, release: unlockMock }
     })
     expect(refreshProbeMock).toHaveBeenCalledWith(DAEMON, { force: true })
   })
@@ -260,6 +265,25 @@ describe('launchd folder recovery', () => {
     expect(await resetFolderAccessForDaemon(DAEMON)).toEqual({ outcome: 'unsupported' })
     expect(resetMacosTccPermissionMock).not.toHaveBeenCalled()
     expect(opendirMock).not.toHaveBeenCalled()
+  })
+  it('never clears the grant when a focus probe already owns the generation', async () => {
+    probeHostMock.mockReturnValue({
+      generationDir: '/owned/uuid',
+      execPath: '/owned/uuid/Orca.app/Helper'
+    })
+    lockMock.mockReturnValue(null)
+    expect(await resetFolderAccessForDaemon(DAEMON)).toEqual({ outcome: 'unsupported' })
+    expect(resetMacosTccPermissionMock).not.toHaveBeenCalled()
+    expect(launchdProbeMock).not.toHaveBeenCalled()
+  })
+  it('releases the reservation when reset fails before prompting', async () => {
+    probeHostMock.mockReturnValue({
+      generationDir: '/owned/uuid',
+      execPath: '/owned/uuid/Orca.app/Helper'
+    })
+    resetMacosTccPermissionMock.mockResolvedValue({ ok: false })
+    expect(await resetFolderAccessForDaemon(DAEMON)).toEqual({ outcome: 'reset_failed' })
+    expect(unlockMock).toHaveBeenCalledOnce()
   })
   it('does not re-probe an unanswered launchd prompt or report stored denial as its outcome', async () => {
     probeHostMock.mockReturnValue({

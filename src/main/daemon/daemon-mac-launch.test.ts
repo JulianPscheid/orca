@@ -13,6 +13,7 @@ const m = vi.hoisted(() => ({
   identity: vi.fn(),
   disconnect: vi.fn(),
   lease: vi.fn(),
+  dispose: vi.fn(),
   unlock: vi.fn()
 }))
 vi.mock('./daemon-mac-host', () => ({ materializeMacDaemonHost: m.materialize }))
@@ -23,14 +24,14 @@ vi.mock('./daemon-mac-launchd-job', () => ({
   macLaunchdStartupError: () => 'startup diagnostic'
 }))
 vi.mock('./daemon-mac-job-retirement', () => ({
-  bootoutMacLaunchdJob: m.bootout,
+  retireFailedMacLaunchdJob: m.bootout,
   terminateMacLaunchdJob: m.terminate
 }))
 vi.mock('./daemon-mac-launch-environment', () => ({
   prepareMacDaemonEnvironment: () => ({
     args: ['--require', '/owned/launch-environment.cjs'],
     env: { ELECTRON_RUN_AS_NODE: '1' },
-    dispose: () => {}
+    dispose: m.dispose
   })
 }))
 vi.mock('./client', () => ({
@@ -93,7 +94,10 @@ describe('authenticated launchd daemon readiness', () => {
   it('a nonce mismatch loses the endpoint race, cleans up only its own job, and lets the caller adopt', async () => {
     m.identity.mockReturnValue({ ...identity, launchNonce: 'winner' })
     await expect(launchMacDaemon(options)).rejects.toBeInstanceOf(DaemonEndpointUnavailableError)
-    expect(m.bootout).toHaveBeenCalledExactlyOnceWith(host)
+    expect(m.bootout).toHaveBeenCalledExactlyOnceWith(
+      host,
+      expect.any(DaemonEndpointUnavailableError)
+    )
     expect(m.unlock).toHaveBeenCalledTimes(1)
     expect(m.lease).not.toHaveBeenCalled()
   })
@@ -122,7 +126,7 @@ describe('authenticated launchd daemon readiness', () => {
         m.inspect.mockResolvedValue({ status: 'exited', exitCode: 1 })
       }
       await expect(launchMacDaemon(options)).resolves.toBeNull()
-      expect(m.bootout).toHaveBeenCalledExactlyOnceWith(host)
+      expect(m.bootout).toHaveBeenCalledExactlyOnceWith(host, expect.any(Error))
       expect(getMacDaemonLaunchStrategy()).toBe('fork')
     }
   )
@@ -141,7 +145,8 @@ describe('authenticated launchd daemon readiness', () => {
     await vi.advanceTimersByTimeAsync(16_000)
     await pending
     expect(m.lease).not.toHaveBeenCalled()
-    expect(m.bootout).toHaveBeenCalledExactlyOnceWith(host)
+    expect(m.bootout).toHaveBeenCalledExactlyOnceWith(host, expect.any(Error))
+    expect(m.dispose).not.toHaveBeenCalled()
     vi.useRealTimers()
   })
   it('does not accept a reused or unrelated PID under the owned job', async () => {
@@ -152,5 +157,11 @@ describe('authenticated launchd daemon readiness', () => {
     await expect(pending).resolves.toBeNull()
     expect(m.lease).not.toHaveBeenCalled()
     vi.useRealTimers()
+  })
+  it('preserves clean winner adoption when the loser lifetime is uncertain, without discarding its startup payload', async () => {
+    m.identity.mockReturnValue({ ...identity, launchNonce: 'winner' })
+    m.bootout.mockResolvedValue(false)
+    await expect(launchMacDaemon(options)).rejects.toMatchObject({ reason: 'occupied' })
+    expect(m.dispose).not.toHaveBeenCalled()
   })
 })
