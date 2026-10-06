@@ -121,9 +121,11 @@ export async function resetFolderAccessForDaemon(
     return { outcome: 'unsupported' }
   }
   let handedOff = false
-  let resetSucceeded = false
+  let resetSucceeded: boolean | undefined = false
   const service = TCC_SERVICE_BY_CWD_CLASS[target.cwdClass]
   const resetPermission = async (): Promise<boolean> => {
+    // A caller deadline cannot classify an in-flight reset as failed.
+    resetSucceeded = undefined
     resetSucceeded = (await resetMacosTccPermission(service, bundleId)).ok
     return resetSucceeded
   }
@@ -147,11 +149,10 @@ export async function resetFolderAccessForDaemon(
       unlock?.()
     }
   }
-  if (!resetSucceeded) {
+  if (resetSucceeded === false) {
     return { outcome: 'reset_failed' }
   }
-  // Why no probe once the deadline passes: the sheet is still up, and a probe under it would read
-  // as denied — a verdict about the unanswered prompt, not about the permission.
+  // Reset or consent may still be pending at the deadline; neither permits a measured verdict.
   if (prompted) {
     await refreshDaemonFolderAccessProbe(identity, { force: true })
   }

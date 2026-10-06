@@ -93,6 +93,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   setPlatform(originalPlatform)
 })
 
@@ -258,7 +259,7 @@ describe('launchd folder recovery', () => {
       generationDir: '/owned/uuid',
       execPath: '/owned/uuid/Orca.app/Contents/Frameworks/Orca Helper.app/Contents/MacOS/Helper'
     })
-    await resetFolderAccessForDaemon(DAEMON)
+    expect(await resetFolderAccessForDaemon(DAEMON)).toEqual({ outcome: 'probed', mismatch: null })
     expect(readMacosBundleIdMock).toHaveBeenCalledWith('/owned/uuid/Orca.app')
     expect(resetMacosTccPermissionMock).toHaveBeenCalledWith(
       'SystemPolicyDocumentsFolder',
@@ -313,6 +314,50 @@ describe('launchd folder recovery', () => {
     expect(await resetFolderAccessForDaemon(DAEMON)).toEqual({ outcome: 'reset_failed' })
     expect(resetMacosTccPermissionMock).not.toHaveBeenCalled()
     expect(refreshProbeMock).not.toHaveBeenCalled()
+  })
+  it('reports unknown while a timed-out reset can still succeed in the background', async () => {
+    vi.useFakeTimers()
+    probeHostMock.mockReturnValue({
+      generationDir: '/owned/uuid',
+      execPath: '/owned/uuid/Orca.app/Helper'
+    })
+    getMismatchMock.mockReturnValue({
+      daemonScope: 'aaaa111122223333',
+      cwdClass: 'documents',
+      freshDaemonAccess: 'denied'
+    })
+    let completeReset: (result: { ok: boolean }) => void = () => {}
+    resetMacosTccPermissionMock.mockReturnValue(
+      new Promise((resolve) => {
+        completeReset = resolve
+      })
+    )
+    launchdProbeMock.mockImplementation(async (_path, options) =>
+      Promise.race([
+        options.reservation.beforeRead().then(() => 'unknown'),
+        new Promise((resolve) => setTimeout(() => resolve('unknown'), options.timeoutMs))
+      ])
+    )
+    const pending = resetFolderAccessForDaemon(DAEMON)
+    await vi.advanceTimersByTimeAsync(60_000)
+    const result = await pending
+    expect(result).toEqual({
+      outcome: 'probed',
+      mismatch: {
+        daemonScope: 'aaaa111122223333',
+        cwdClass: 'documents',
+        freshDaemonAccess: 'unknown'
+      }
+    })
+    completeReset({ ok: true })
+    await vi.advanceTimersByTimeAsync(1)
+    expect(result.outcome).toBe('probed')
+    expect(resetMacosTccPermissionMock).toHaveResolvedWith({ ok: true })
+    expect(refreshProbeMock).not.toHaveBeenCalled()
+    expect(trackMock).toHaveBeenCalledWith('daemon_folder_access_notice', {
+      action: 'reset_outcome_unknown',
+      cwd_class: 'documents'
+    })
   })
   it('does not re-probe an unanswered launchd prompt or report stored denial as its outcome', async () => {
     probeHostMock.mockReturnValue({

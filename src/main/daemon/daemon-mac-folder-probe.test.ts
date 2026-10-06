@@ -114,7 +114,12 @@ describe('fresh folder permission subject', () => {
       expect(release).toHaveBeenCalledOnce()
     }
   )
-  it.each([true, false])('holds the folder read until reset settles: %s', async (allowed) => {
+  it.each([
+    { allowed: true, delayMs: 0 },
+    { allowed: false, delayMs: 0 },
+    { allowed: true, delayMs: 60_001 }
+  ])('holds the folder read until a timely successful reset: %j', async ({ allowed, delayMs }) => {
+    vi.useFakeTimers()
     const readFolder = vi.fn()
     let poll: () => void = () => {}
     m.bootstrap.mockImplementation(async (job, args) => {
@@ -141,6 +146,9 @@ describe('fresh folder permission subject', () => {
       expect(m.bootstrap).toHaveResolved()
       poll()
       expect(readFolder).not.toHaveBeenCalled()
+      if (delayMs) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      }
       return allowed
     })
     m.inspect.mockImplementation(async () => {
@@ -152,14 +160,24 @@ describe('fresh folder permission subject', () => {
       }
     })
     const release = vi.fn()
-    const result = await probeMacDaemonFolder('readFolder()', '/Documents', {}, 60_000, {
+    const pending = probeMacDaemonFolder('readFolder()', '/Documents', {}, 60_000, {
       host: m.find(),
       release,
       beforeRead
     })
+    if (delayMs >= 60_000) {
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(await pending).toBeNull()
+      expect(release).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(delayMs - 60_000)
+    } else {
+      await vi.advanceTimersByTimeAsync(delayMs)
+    }
+    const result = await pending
+    const permitted = allowed && delayMs < 60_000
     expect(beforeRead).toHaveBeenCalledOnce()
-    expect(readFolder).toHaveBeenCalledTimes(allowed ? 1 : 0)
-    expect(result).toBe(allowed ? '{"outcome":"ok"}\n' : null)
+    expect(readFolder).toHaveBeenCalledTimes(permitted ? 1 : 0)
+    expect(result).toBe(permitted ? '{"outcome":"ok"}\n' : null)
     expect(release).toHaveBeenCalledOnce()
   })
   it('leaves a pending consent read alive after the UI deadline and cleans up when answered', async () => {

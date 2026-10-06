@@ -114,6 +114,9 @@ The explicit Fix reserves the generation and successfully submits its prompt job
 the TCC row. The child waits for reset success before reading; failed submission leaves the grant
 untouched, and failed reset makes the child exit without a folder read. It allows sixty seconds
 for a response.
+Reset still pending at that deadline reports unknown, since it can complete in the background.
+The child rechecks the deadline after reset; late success cancels its read rather than raising a
+new consent sheet after the dialog has returned.
 A live read may own a consent sheet: neither deadline signals or kills it. It continues under
 its pin, checked once per second after the deadline, until a response produces positive exit
 and permits cleanup. Inconclusive job evidence retains the pin. An unanswered prompt or a

@@ -84,7 +84,7 @@ export async function probeMacDaemonFolder(
       if (beforeRead) {
         let permitted = false
         try {
-          permitted = Date.now() < deadlineMs && (await beforeRead())
+          permitted = Date.now() < deadlineMs && (await beforeRead()) && Date.now() < deadlineMs
         } finally {
           writeFileSync(`${gate}.staging`, permitted ? 'read' : 'cancel', {
             flag: 'wx',
